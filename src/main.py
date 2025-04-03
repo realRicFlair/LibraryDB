@@ -9,7 +9,7 @@ def create_connection(db_file="library.db"):
 def create_tables(conn):
     cursor = conn.cursor()
     
-    # Table for library items
+    # Table for library items (added status and location columns)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS Items (
         item_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,8 +18,10 @@ def create_tables(conn):
         author TEXT,
         publisher TEXT,
         publication_year INTEGER,
-        ISBN TEXT UNIQUE CHECK (LENGTH(ISBN) = 10 OR LENGTH(ISBN) = 13),
-        available_copies INTEGER NOT NULL
+        ISBN TEXT UNIQUE CHECK (ISBN IS NULL OR LENGTH(ISBN) = 10 OR LENGTH(ISBN) = 13),
+        available_copies INTEGER NOT NULL,
+        status TEXT DEFAULT 'available' CHECK(status IN ('available','borrowed','donated')),
+        location TEXT DEFAULT 'Library Shelf'
     );
     """)
     
@@ -154,9 +156,8 @@ def create_tables(conn):
         FOREIGN KEY(event_id) REFERENCES Events(event_id)
     );
     """)
-
-    # Trigger: Check event capacity before registration
-    cursor.execute("DROP TRIGGER IF EXISTS check_event_capacity;")
+    
+    # Trigger: Update volunteer participation count after registration
     cursor.execute("""
         CREATE TRIGGER IF NOT EXISTS update_participation_count
         AFTER INSERT ON VolunteerRegistrations
@@ -167,7 +168,7 @@ def create_tables(conn):
             WHERE volunteer_id = NEW.user_id;
         END;
         """)
-
+    
     # Table for help requests
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS HelpRequests (
@@ -195,7 +196,7 @@ def populate_sample_data(conn):
     ]
     cursor.executemany("INSERT INTO Rooms (room_name, capacity) VALUES (?, ?);", rooms)
     
-    # Insert sample personnel (librarians, etc.)
+    # Insert sample personnel (librarians, staff, volunteers, etc.)
     personnel = [
         ("Alice", "Smith", "F", "1998-04-30", "alice.smith@library.org", "123-456-7890", "302 Happy Street", "Member"),
         ("Bob", "Johnson", "M", "1976-08-15", "bob.johnson@library.org", "234-567-8901", None, "Staff"),
@@ -208,22 +209,10 @@ def populate_sample_data(conn):
         ("Isabel", "Martinez", "F", "1988-09-14", None, "789-012-3456", "55 Cedar Drive", "Staff"),
         ("Jack", "Taylor", "Other", "1995-02-28", "jack.taylor@library.org", None, "900 Elm St", "Volunteer")
     ]
-    cursor.executemany("INSERT INTO Personnel (first_name, last_name, gender, birth_date, email, phone, address, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?);", personnel)
-    
-    # Insert sample users (at least 10 entries)
-    # users = [
-    #     ("John", "Doe", "john.doe@example.com", "111-111-1111", "123 Maple St"),
-    #     ("Jane", "Doe", "jane.doe@example.com", "222-222-2222", "456 Oak Ave"),
-    #     ("Mike", "Brown", "mike.brown@example.com", "333-333-3333", "789 Pine Rd"),
-    #     ("Emily", "Davis", "emily.davis@example.com", "444-444-4444", "321 Birch Ln"),
-    #     ("David", "Wilson", "david.wilson@example.com", "555-555-5555", "654 Cedar Ct"),
-    #     ("Sophia", "Taylor", "sophia.taylor@example.com", "666-666-6666", "987 Spruce Dr"),
-    #     ("Daniel", "Anderson", "daniel.anderson@example.com", "777-777-7777", "159 Elm St"),
-    #     ("Olivia", "Thomas", "olivia.thomas@example.com", "888-888-8888", "753 Walnut Ave"),
-    #     ("Liam", "Jackson", "liam.jackson@example.com", "999-999-9999", "852 Fir Blvd"),
-    #     ("Ava", "White", "ava.white@example.com", "000-000-0000", "951 Poplar Rd")
-    # ]
-    # cursor.executemany("INSERT INTO Users (first_name, last_name, email, phone, address) VALUES (?, ?, ?, ?, ?);", users)
+    cursor.executemany("""
+        INSERT INTO Personnel (first_name, last_name, gender, birth_date, email, phone, address, role) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    """, personnel)
     
     # Insert sample items (at least 10 entries)
     items = [
@@ -242,26 +231,6 @@ def populate_sample_data(conn):
     INSERT INTO Items (title, item_type, author, publisher, publication_year, ISBN, available_copies)
     VALUES (?, ?, ?, ?, ?, ?, ?);
     """, items)
-    
-    # Insert sample borrow transactions (10 entries)
-    # today = datetime.date.today().isoformat()
-    # due = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
-    # borrow_transactions = [
-    #     (1, 1, today, due, None, 0),  # John borrows "The Great Gatsby"
-    #     (2, 2, today, due, None, 0),
-    #     (3, 3, today, due, None, 0),
-    #     (4, 4, today, due, None, 0),
-    #     (5, 5, today, due, None, 0),
-    #     (6, 6, today, due, None, 0),
-    #     (7, 7, today, due, None, 0),
-    #     (8, 8, today, due, None, 0),
-    #     (9, 9, today, due, None, 0),
-    #     (10, 10, today, due, None, 0)
-    # ]
-    # cursor.executemany("""
-    # INSERT INTO BorrowTransactions (user_id, item_id, borrow_date, due_date, return_date, fine)
-    # VALUES (?, ?, ?, ?, ?, ?);
-    # """, borrow_transactions)
     
     # Insert sample events (10 entries)
     events = [
@@ -322,7 +291,6 @@ def populate_sample_data(conn):
         (9, 2, "Help with digital resources", "pending"),
         (10, 3, "Assistance with research", "pending")
     ]
-    # Note: Some help requests may not have a librarian assigned yet (NULL librarian_id)
     cursor.executemany("""
     INSERT INTO HelpRequests (user_id, librarian_id, description, status)
     VALUES (?, ?, ?, ?);
@@ -330,7 +298,9 @@ def populate_sample_data(conn):
     
     conn.commit()
 
-# Sample functions for the database application
+# -----------------------------
+# Application Functions
+# -----------------------------
 
 def find_item(conn, column, value):
     try:
@@ -339,17 +309,27 @@ def find_item(conn, column, value):
         cursor.execute(query, (f"%{value}%",))
         results = cursor.fetchall()
 
-        # Print each result found
         if results:
             for row in results:
-                print(row)  # You can format it better if needed
+                print(row)
         else:
             print(f"No items found with {column} containing '{value}'.")
     except sqlite3.OperationalError as e:
-        print(f"Error: {e}. Please make sure the column '{column}' exists in the table.")
+        print(f"Error: {e}. Please make sure the column '{column}' exists.")
 
 def borrow_item(conn, user_id, item_id):
     cursor = conn.cursor()
+    # Check available copies
+    cursor.execute("SELECT available_copies FROM Items WHERE item_id = ?", (item_id,))
+    result = cursor.fetchone()
+    if result is None:
+        print("Item not found.")
+        return
+    available = result[0]
+    if available <= 0:
+        print("No available copies for this item.")
+        return
+
     borrow_date = datetime.date.today().isoformat()
     due_date = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
     try:
@@ -357,29 +337,47 @@ def borrow_item(conn, user_id, item_id):
         INSERT INTO BorrowTransactions (user_id, item_id, borrow_date, due_date)
         VALUES (?, ?, ?, ?);
         """, (user_id, item_id, borrow_date, due_date))
-        # Update item status to 'borrowed'
-        cursor.execute("UPDATE Items SET status = 'borrowed' WHERE item_id = ?;", (item_id,))
+        # Decrement available copies
+        cursor.execute("UPDATE Items SET available_copies = available_copies - 1 WHERE item_id = ?;", (item_id,))
+        # If no copies left, update status to 'borrowed'
+        cursor.execute("SELECT available_copies FROM Items WHERE item_id = ?;", (item_id,))
+        new_available = cursor.fetchone()[0]
+        if new_available <= 0:
+            cursor.execute("UPDATE Items SET status = 'borrowed' WHERE item_id = ?;", (item_id,))
         conn.commit()
         print("Item borrowed successfully.")
     except sqlite3.Error as e:
         print("Error borrowing item:", e)
+
+def get_active_borrow_transactions(conn, user_id):
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT transaction_id, item_id, borrow_date, due_date 
+    FROM BorrowTransactions 
+    WHERE user_id = ? AND return_date IS NULL;
+    """, (user_id,))
+    return cursor.fetchall()
 
 def return_item(conn, transaction_id, return_date=None):
     cursor = conn.cursor()
     if return_date is None:
         return_date = datetime.date.today().isoformat()
     try:
+        # Get the item_id for the transaction
+        cursor.execute("SELECT item_id FROM BorrowTransactions WHERE transaction_id = ? AND return_date IS NULL", (transaction_id,))
+        row = cursor.fetchone()
+        if row is None:
+            print("No active borrow transaction found with that ID.")
+            return
+        item_id = row[0]
         cursor.execute("""
         UPDATE BorrowTransactions 
         SET return_date = ? 
         WHERE transaction_id = ?;
         """, (return_date, transaction_id))
-        # Optionally, update item status back to 'available'
-        cursor.execute("""
-        UPDATE Items 
-        SET status = 'available' 
-        WHERE item_id = (SELECT item_id FROM BorrowTransactions WHERE transaction_id = ?);
-        """, (transaction_id,))
+        # Increment available copies
+        cursor.execute("UPDATE Items SET available_copies = available_copies + 1 WHERE item_id = ?;", (item_id,))
+        cursor.execute("UPDATE Items SET status = 'available' WHERE item_id = ?;", (item_id,))
         conn.commit()
         print("Item returned successfully.")
     except sqlite3.Error as e:
@@ -388,13 +386,11 @@ def return_item(conn, transaction_id, return_date=None):
 def donate_item(conn, user_id, title, author, publication_year, item_type, condition, location="Donation Desk"):
     cursor = conn.cursor()
     try:
-        # Insert donated item into Items with status 'donated'
         cursor.execute("""
-        INSERT INTO Items (title, author, publication_year, item_type, status, location)
-        VALUES (?, ?, ?, ?, 'donated', ?);
+        INSERT INTO Items (title, author, publication_year, item_type, status, location, available_copies)
+        VALUES (?, ?, ?, ?, 'donated', ?, 1);
         """, (title, author, publication_year, item_type, location))
         item_id = cursor.lastrowid
-        # Record the donation
         cursor.execute("""
         INSERT INTO Donations (user_id, item_id, condition)
         VALUES (?, ?, ?);
@@ -406,7 +402,10 @@ def donate_item(conn, user_id, title, author, publication_year, item_type, condi
 
 def find_event(conn, event_name):
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM Events WHERE event_name LIKE ?", (f"%{event_name}%",))
+    if event_name.strip() == "":
+        cursor.execute("SELECT * FROM Events;")
+    else:
+        cursor.execute("SELECT * FROM Events WHERE event_name LIKE ?", (f"%{event_name}%",))
     return cursor.fetchall()
 
 def register_event(conn, user_id, event_id):
@@ -445,60 +444,52 @@ def ask_for_help(conn, user_id, description, librarian_id=None):
     except sqlite3.Error as e:
         print("Error submitting help request:", e)
 
-
-# Utility functions for debug
+# -----------------------------
+# Utility Functions for Debug
+# -----------------------------
 
 def drop_all_tables(conn):
     conn.execute("PRAGMA foreign_keys = OFF;")
     cursor = conn.cursor()
 
-    # Get a list of all tables
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tables = cursor.fetchall()
 
-    # Drop each table
     for table in tables:
         table_name = table[0]
         if table_name != 'sqlite_sequence':
             cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
-
     conn.execute("PRAGMA foreign_keys = ON;")
 
 def get_tables(conn):
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-
     tables = cursor.fetchall()
-
-    # Print the table names
     print("Tables in the database:")
-    for i in range(len(tables)):
-        print(f"{i+1}.", tables[i])
+    for i, table in enumerate(tables, 1):
+        print(f"{i}. {table[0]}")
 
 def print_table(conn, table_name):
     cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM {}".format(table_name))
+    cursor.execute(f"SELECT * FROM {table_name}")
     rows = cursor.fetchall()
-
-    # Print column headers
-    columns = [desc[0] for desc in cursor.description]  # Get column names
-    print("\t".join(columns))  # Print column names with tab spacing
+    columns = [desc[0] for desc in cursor.description]
+    print("\t".join(columns))
     print("-" * 50)
-
-    # Print each row
     for row in rows:
-        print("\t".join(map(str, row)))  # Convert each value to a string before printing
+        print("\t".join(map(str, row)))
 
-# Main execution block
+# -----------------------------
+# Main Execution Block
+# -----------------------------
+
 if __name__ == '__main__':
     conn = create_connection()
     drop_all_tables(conn)
     create_tables(conn)
     populate_sample_data(conn)
 
-    user_input = "N/A"
-
+    user_input = ""
     while user_input != "9":
         print("""Available Actions:
 1. Find an item in the library
@@ -510,47 +501,85 @@ if __name__ == '__main__':
 7. Volunteer for an event
 8. Ask for help
 9. End""")
-        user_input = input("Please choose action: ")
+        user_input = input("Please choose action: ").strip()
 
         if user_input == "1":
-            column = input("Please enter search type (Title, Type, Author, Publisher, Year, ISBN): ")
-            if column == "Type":
+            column = input("Search by (Title, Type, Author, Publisher, Year, ISBN): ").strip()
+            # Map input to column names
+            if column.lower() == "type":
                 column = "item_type"
-                value = input("Search value (print_book, 'online_book', 'magazine', 'journal', 'cd', 'record'): ")
-            elif column == "Year":
+            elif column.lower() == "year":
                 column = "publication_year"
-                value = input("Search value: ")
             else:
-                value = input("Search value: ")
+                column = column.lower()
+            value = input("Enter search value: ").strip()
             find_item(conn, column, value)
+        
         elif user_input == "2":
-            user_id = input("Please enter your user ID: ")
-            event_id = input("Please enter the ID of the event you would like to register for: ")
-            register_event(conn, user_id, event_id)
+            user_id = input("Enter your user ID: ").strip()
+            item_id = input("Enter the ID of the item to borrow: ").strip()
+            borrow_item(conn, user_id, item_id)
+        
         elif user_input == "3":
-            print("3")
+            user_id = input("Enter your user ID: ").strip()
+            transactions = get_active_borrow_transactions(conn, user_id)
+            if not transactions:
+                print("No active borrow transactions found.")
+            else:
+                print("Active Borrow Transactions:")
+                for trans in transactions:
+                    print(f"Transaction ID: {trans[0]}, Item ID: {trans[1]}, Borrow Date: {trans[2]}, Due Date: {trans[3]}")
+                trans_id = input("Enter the Transaction ID you want to return: ").strip()
+                return_item(conn, trans_id)
+        
         elif user_input == "4":
-            print("4")
+            user_id = input("Enter your user ID: ").strip()
+            title = input("Enter the title of the donated item: ").strip()
+            author = input("Enter the author (if applicable, else leave blank): ").strip()
+            publication_year = input("Enter the publication year: ").strip()
+            item_type = input("Enter the item type (print_book, online_book, magazine, journal, cd, record): ").strip()
+            condition = input("Enter the condition of the item: ").strip()
+            location = input("Enter donation location (or press Enter for default 'Donation Desk'): ").strip()
+            if location == "":
+                location = "Donation Desk"
+            donate_item(conn, user_id, title, author, publication_year, item_type, condition, location)
+        
         elif user_input == "5":
-            print("5")
+            event_name = input("Enter event name to search (or press Enter to list all events): ").strip()
+            events = find_event(conn, event_name)
+            if events:
+                for event in events:
+                    print(event)
+            else:
+                print("No events found.")
+        
         elif user_input == "6":
-            user_id = input("Please enter your user ID: ")
-            event_id = input("Please enter the ID of the event you would like to register for: ")
+            user_id = input("Enter your user ID: ").strip()
+            event_id = input("Enter the event ID to register for: ").strip()
             register_event(conn, user_id, event_id)
+        
         elif user_input == "7":
-            user_id = input("Please enter your user ID: ")
-            event_id = input("Please enter the ID of the event you would like to volunteer for: ")
+            user_id = input("Enter your user ID: ").strip()
+            event_id = input("Enter the event ID to volunteer for: ").strip()
             volunteer_for_library(conn, user_id, event_id)
+        
         elif user_input == "8":
-            print("8")
-        elif user_input == "Check":
+            user_id = input("Enter your user ID: ").strip()
+            description = input("Enter your help request description: ").strip()
+            librarian_id = input("Enter librarian ID (if known, else leave blank): ").strip()
+            if librarian_id == "":
+                librarian_id = None
+            ask_for_help(conn, user_id, description, librarian_id)
+        
+        elif user_input.lower() == "check":
             get_tables(conn)
-            table_name = input("Enter table name: ")
+            table_name = input("Enter table name to display: ").strip()
             print_table(conn, table_name)
+        
         elif user_input != "9":
             print("Invalid input. Please try again.")
-
+        
         print("\n")
-
+    
     print("Thank you for using our service. See you next time!")
     conn.close()
